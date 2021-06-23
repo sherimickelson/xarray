@@ -2,6 +2,7 @@ import contextlib
 import inspect
 from copy import copy
 from datetime import datetime
+from typing import Any, Dict, Union
 
 import numpy as np
 import pandas as pd
@@ -16,6 +17,7 @@ from xarray.plot.utils import (
     _build_discrete_cmap,
     _color_palette,
     _determine_cmap_params,
+    _maybe_gca,
     get_axis,
     label_from_attrs,
 )
@@ -27,6 +29,7 @@ from . import (
     requires_cartopy,
     requires_cftime,
     requires_matplotlib,
+    requires_matplotlib_3_3_0,
     requires_nc_time_axis,
     requires_seaborn,
 )
@@ -35,6 +38,7 @@ from . import (
 try:
     import matplotlib as mpl
     import matplotlib.pyplot as plt
+    import mpl_toolkits  # type: ignore
 except ImportError:
     pass
 
@@ -131,8 +135,8 @@ class PlotTestCase:
         # Remove all matplotlib figures
         plt.close("all")
 
-    def pass_in_axis(self, plotmethod):
-        fig, axes = plt.subplots(ncols=2)
+    def pass_in_axis(self, plotmethod, subplot_kw=None):
+        fig, axes = plt.subplots(ncols=2, subplot_kw=subplot_kw)
         plotmethod(ax=axes[0])
         assert axes[0].has_data()
 
@@ -680,10 +684,9 @@ class TestPlot1D(PlotTestCase):
     def test_can_pass_in_axis(self):
         self.pass_in_axis(self.darray.plot.line)
 
-    def test_nonnumeric_index_raises_typeerror(self):
+    def test_nonnumeric_index(self):
         a = DataArray([1, 2, 3], {"letter": ["a", "b", "c"]}, dims="letter")
-        with pytest.raises(TypeError, match=r"[Pp]lot"):
-            a.plot.line()
+        a.plot.line()
 
     def test_primitive_returned(self):
         p = self.darray.plot.line()
@@ -1106,6 +1109,9 @@ class Common2dMixin:
     Should have the same name as the method.
     """
 
+    # Needs to be overridden in TestSurface for facet grid plots
+    subplot_kws: Union[Dict[Any, Any], None] = None
+
     @pytest.fixture(autouse=True)
     def setUp(self):
         da = DataArray(
@@ -1155,9 +1161,13 @@ class Common2dMixin:
         with pytest.raises(ValueError, match=r"DataArray must be 2d"):
             self.plotfunc(a)
 
-    def test_nonnumeric_index_raises_typeerror(self):
+    def test_nonnumeric_index(self):
         a = DataArray(easy_array((3, 2)), coords=[["a", "b", "c"], ["d", "e"]])
-        with pytest.raises(TypeError, match=r"[Pp]lot"):
+        if self.plotfunc.__name__ == "surface":
+            # ax.plot_surface errors with nonnumerics:
+            with pytest.raises(Exception):
+                self.plotfunc(a)
+        else:
             self.plotfunc(a)
 
     def test_multiindex_raises_typeerror(self):
@@ -1421,7 +1431,7 @@ class Common2dMixin:
     def test_verbose_facetgrid(self):
         a = easy_array((10, 15, 3))
         d = DataArray(a, dims=["y", "x", "z"])
-        g = xplt.FacetGrid(d, col="z")
+        g = xplt.FacetGrid(d, col="z", subplot_kws=self.subplot_kws)
         g.map_dataarray(self.plotfunc, "x", "y")
         for ax in g.axes.flat:
             assert ax.has_data()
@@ -1819,6 +1829,95 @@ class TestImshow(Common2dMixin, PlotTestCase):
             da.plot.imshow(origin="lower")
             assert plt.xlim()[0] < 0
             assert plt.ylim()[0] < 0
+
+
+class TestSurface(Common2dMixin, PlotTestCase):
+
+    plotfunc = staticmethod(xplt.surface)
+    subplot_kws = {"projection": "3d"}
+
+    def test_primitive_artist_returned(self):
+        artist = self.plotmethod()
+        assert isinstance(artist, mpl_toolkits.mplot3d.art3d.Poly3DCollection)
+
+    @pytest.mark.slow
+    def test_2d_coord_names(self):
+        self.plotmethod(x="x2d", y="y2d")
+        # make sure labels came out ok
+        ax = plt.gca()
+        assert "x2d" == ax.get_xlabel()
+        assert "y2d" == ax.get_ylabel()
+        assert f"{self.darray.long_name} [{self.darray.units}]" == ax.get_zlabel()
+
+    def test_xyincrease_false_changes_axes(self):
+        # Does not make sense for surface plots
+        pytest.skip("does not make sense for surface plots")
+
+    def test_xyincrease_true_changes_axes(self):
+        # Does not make sense for surface plots
+        pytest.skip("does not make sense for surface plots")
+
+    def test_can_pass_in_axis(self):
+        self.pass_in_axis(self.plotmethod, subplot_kw={"projection": "3d"})
+
+    def test_default_cmap(self):
+        # Does not make sense for surface plots with default arguments
+        pytest.skip("does not make sense for surface plots")
+
+    def test_diverging_color_limits(self):
+        # Does not make sense for surface plots with default arguments
+        pytest.skip("does not make sense for surface plots")
+
+    def test_colorbar_kwargs(self):
+        # Does not make sense for surface plots with default arguments
+        pytest.skip("does not make sense for surface plots")
+
+    def test_cmap_and_color_both(self):
+        # Does not make sense for surface plots with default arguments
+        pytest.skip("does not make sense for surface plots")
+
+    def test_seaborn_palette_as_cmap(self):
+        # seaborn does not work with mpl_toolkits.mplot3d
+        with pytest.raises(ValueError):
+            super().test_seaborn_palette_as_cmap()
+
+    # Need to modify this test for surface(), because all subplots should have labels,
+    # not just left and bottom
+    @pytest.mark.filterwarnings("ignore:tight_layout cannot")
+    def test_convenient_facetgrid(self):
+        a = easy_array((10, 15, 4))
+        d = DataArray(a, dims=["y", "x", "z"])
+        g = self.plotfunc(d, x="x", y="y", col="z", col_wrap=2)
+
+        assert_array_equal(g.axes.shape, [2, 2])
+        for (y, x), ax in np.ndenumerate(g.axes):
+            assert ax.has_data()
+            assert "y" == ax.get_ylabel()
+            assert "x" == ax.get_xlabel()
+
+        # Infering labels
+        g = self.plotfunc(d, col="z", col_wrap=2)
+        assert_array_equal(g.axes.shape, [2, 2])
+        for (y, x), ax in np.ndenumerate(g.axes):
+            assert ax.has_data()
+            assert "y" == ax.get_ylabel()
+            assert "x" == ax.get_xlabel()
+
+    @requires_matplotlib_3_3_0
+    def test_viridis_cmap(self):
+        return super().test_viridis_cmap()
+
+    @requires_matplotlib_3_3_0
+    def test_can_change_default_cmap(self):
+        return super().test_can_change_default_cmap()
+
+    @requires_matplotlib_3_3_0
+    def test_colorbar_default_label(self):
+        return super().test_colorbar_default_label()
+
+    @requires_matplotlib_3_3_0
+    def test_facetgrid_map_only_appends_mappables(self):
+        return super().test_facetgrid_map_only_appends_mappables()
 
 
 class TestFacetGrid(PlotTestCase):
@@ -2681,3 +2780,31 @@ def test_get_axis_cartopy():
     with figure_context():
         ax = get_axis(**kwargs)
         assert isinstance(ax, cartopy.mpl.geoaxes.GeoAxesSubplot)
+
+
+@requires_matplotlib
+def test_maybe_gca():
+
+    with figure_context():
+        ax = _maybe_gca(aspect=1)
+
+        assert isinstance(ax, mpl.axes.Axes)
+        assert ax.get_aspect() == 1
+
+    with figure_context():
+
+        # create figure without axes
+        plt.figure()
+        ax = _maybe_gca(aspect=1)
+
+        assert isinstance(ax, mpl.axes.Axes)
+        assert ax.get_aspect() == 1
+
+    with figure_context():
+        existing_axes = plt.axes()
+        ax = _maybe_gca(aspect=1)
+
+        # re-uses the existing axes
+        assert existing_axes == ax
+        # kwargs are ignored when reusing axes
+        assert ax.get_aspect() == "auto"

@@ -6,11 +6,13 @@ from distutils import version
 from unittest import mock  # noqa: F401
 
 import numpy as np
+import pandas as pd
 import pytest
 from numpy.testing import assert_array_equal  # noqa: F401
 from pandas.testing import assert_frame_equal  # noqa: F401
 
 import xarray.testing
+from xarray import Dataset
 from xarray.core import utils
 from xarray.core.duck_array_ops import allclose_or_equiv  # noqa: F401
 from xarray.core.indexing import ExplicitlyIndexed
@@ -59,6 +61,9 @@ def LooseVersion(vstring):
 
 
 has_matplotlib, requires_matplotlib = _importorskip("matplotlib")
+has_matplotlib_3_3_0, requires_matplotlib_3_3_0 = _importorskip(
+    "matplotlib", minversion="3.3.0"
+)
 has_scipy, requires_scipy = _importorskip("scipy")
 has_pydap, requires_pydap = _importorskip("pydap.client")
 has_netCDF4, requires_netCDF4 = _importorskip("netCDF4")
@@ -66,7 +71,6 @@ has_h5netcdf, requires_h5netcdf = _importorskip("h5netcdf")
 has_pynio, requires_pynio = _importorskip("Nio")
 has_pseudonetcdf, requires_pseudonetcdf = _importorskip("PseudoNetCDF")
 has_cftime, requires_cftime = _importorskip("cftime")
-has_cftime_1_1_0, requires_cftime_1_1_0 = _importorskip("cftime", minversion="1.1.0.0")
 has_cftime_1_4_1, requires_cftime_1_4_1 = _importorskip("cftime", minversion="1.4.1")
 has_dask, requires_dask = _importorskip("dask")
 has_bottleneck, requires_bottleneck = _importorskip("bottleneck")
@@ -198,3 +202,30 @@ def assert_allclose(a, b, **kwargs):
     xarray.testing.assert_allclose(a, b, **kwargs)
     xarray.testing._assert_internal_invariants(a)
     xarray.testing._assert_internal_invariants(b)
+
+
+def create_test_data(seed=None, add_attrs=True):
+    rs = np.random.RandomState(seed)
+    _vars = {
+        "var1": ["dim1", "dim2"],
+        "var2": ["dim1", "dim2"],
+        "var3": ["dim3", "dim1"],
+    }
+    _dims = {"dim1": 8, "dim2": 9, "dim3": 10}
+
+    obj = Dataset()
+    obj["dim2"] = ("dim2", 0.5 * np.arange(_dims["dim2"]))
+    obj["dim3"] = ("dim3", list("abcdefghij"))
+    obj["time"] = ("time", pd.date_range("2000-01-01", periods=20))
+    for v, dims in sorted(_vars.items()):
+        data = rs.normal(size=tuple(_dims[d] for d in dims))
+        obj[v] = (dims, data)
+        if add_attrs:
+            obj[v].attrs = {"foo": "variable"}
+    obj.coords["numbers"] = (
+        "dim3",
+        np.array([0, 1, 2, 0, 0, 1, 1, 2, 2, 3], dtype="int64"),
+    )
+    obj.encoding = {"foo": "bar"}
+    assert all(obj.data.flags.writeable for obj in obj.variables.values())
+    return obj

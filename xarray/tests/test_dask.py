@@ -94,7 +94,7 @@ class TestVariable(DaskTestCase):
 
     def test_chunk(self):
         for chunks, expected in [
-            (None, ((2, 2), (2, 2, 2))),
+            ({}, ((2, 2), (2, 2, 2))),
             (3, ((3, 1), (3, 3))),
             ({"x": 3, "y": 3}, ((3, 1), (3, 3))),
             ({"x": 3}, ((3, 1), (2, 2, 2))),
@@ -110,7 +110,36 @@ class TestVariable(DaskTestCase):
         self.assertLazyAndIdentical(u[0], v[0])
         self.assertLazyAndIdentical(u[:1], v[:1])
         self.assertLazyAndIdentical(u[[0, 1], [0, 1, 2]], v[[0, 1], [0, 1, 2]])
+
+    @pytest.mark.skipif(
+        LooseVersion(dask.__version__) < LooseVersion("2021.04.1"),
+        reason="Requires dask v2021.04.1 or later",
+    )
+    @pytest.mark.parametrize(
+        "expected_data, index",
+        [
+            (da.array([99, 2, 3, 4]), 0),
+            (da.array([99, 99, 99, 4]), slice(2, None, -1)),
+            (da.array([99, 99, 3, 99]), [0, -1, 1]),
+            (da.array([99, 99, 99, 4]), np.arange(3)),
+            (da.array([1, 99, 99, 99]), [False, True, True, True]),
+            (da.array([1, 99, 99, 99]), np.arange(4) > 0),
+            (da.array([99, 99, 99, 99]), Variable(("x"), da.array([1, 2, 3, 4])) > 0),
+        ],
+    )
+    def test_setitem_dask_array(self, expected_data, index):
+        arr = Variable(("x"), da.array([1, 2, 3, 4]))
+        expected = Variable(("x"), expected_data)
+        arr[index] = 99
+        assert_identical(arr, expected)
+
+    @pytest.mark.skipif(
+        LooseVersion(dask.__version__) >= LooseVersion("2021.04.1"),
+        reason="Requires dask v2021.04.0 or earlier",
+    )
+    def test_setitem_dask_array_error(self):
         with pytest.raises(TypeError, match=r"stored in a dask array"):
+            v = self.lazy_var
             v[:1] = 0
 
     def test_squeeze(self):
@@ -1040,11 +1069,25 @@ def test_unify_chunks(map_ds):
     with pytest.raises(ValueError, match=r"inconsistent chunks"):
         ds_copy.chunks
 
-    expected_chunks = {"x": (4, 4, 2), "y": (5, 5, 5, 5), "z": (4,)}
+    expected_chunks = {"x": (4, 4, 2), "y": (5, 5, 5, 5)}
     with raise_if_dask_computes():
         actual_chunks = ds_copy.unify_chunks().chunks
-    expected_chunks == actual_chunks
+    assert actual_chunks == expected_chunks
     assert_identical(map_ds, ds_copy.unify_chunks())
+
+    out_a, out_b = xr.unify_chunks(ds_copy.cxy, ds_copy.drop_vars("cxy"))
+    assert out_a.chunks == ((4, 4, 2), (5, 5, 5, 5))
+    assert out_b.chunks == expected_chunks
+
+    # Test unordered dims
+    da = ds_copy["cxy"]
+    out_a, out_b = xr.unify_chunks(da.chunk({"x": -1}), da.T.chunk({"y": -1}))
+    assert out_a.chunks == ((4, 4, 2), (5, 5, 5, 5))
+    assert out_b.chunks == ((5, 5, 5, 5), (4, 4, 2))
+
+    # Test mismatch
+    with pytest.raises(ValueError, match=r"Dimension 'x' size mismatch: 10 != 2"):
+        xr.unify_chunks(da, da.isel(x=slice(2)))
 
 
 @pytest.mark.parametrize("obj", [make_ds(), make_da()])

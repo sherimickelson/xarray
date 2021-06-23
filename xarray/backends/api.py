@@ -1,4 +1,5 @@
 import os
+import warnings
 from glob import glob
 from io import BytesIO
 from numbers import Number
@@ -11,6 +12,7 @@ from typing import (
     Iterable,
     Mapping,
     MutableMapping,
+    Optional,
     Tuple,
     Union,
 )
@@ -101,12 +103,11 @@ def _get_default_engine_netcdf():
 
 def _get_default_engine(path: str, allow_remote: bool = False):
     if allow_remote and is_remote_uri(path):
-        engine = _get_default_engine_remote_uri()
+        return _get_default_engine_remote_uri()
     elif path.endswith(".gz"):
-        engine = _get_default_engine_gz()
+        return _get_default_engine_gz()
     else:
-        engine = _get_default_engine_netcdf()
-    return engine
+        return _get_default_engine_netcdf()
 
 
 def _validate_dataset_names(dataset):
@@ -212,7 +213,7 @@ def _protect_dataset_variables_inplace(dataset, cache):
 
 
 def _finalize_store(write, store):
-    """ Finalize this store by explicitly syncing and closing"""
+    """Finalize this store by explicitly syncing and closing"""
     del write  # ensure writing is done first
     store.close()
 
@@ -281,7 +282,7 @@ def _chunk_ds(
 
     mtime = _get_mtime(filename_or_obj)
     token = tokenize(filename_or_obj, mtime, engine, chunks, **extra_tokens)
-    name_prefix = "open_dataset-%s" % token
+    name_prefix = f"open_dataset-{token}"
 
     variables = {}
     for name, var in backend_ds.variables.items():
@@ -294,8 +295,7 @@ def _chunk_ds(
             name_prefix=name_prefix,
             token=token,
         )
-    ds = backend_ds._replace(variables)
-    return ds
+    return backend_ds._replace(variables)
 
 
 def _dataset_from_backend_dataset(
@@ -307,12 +307,10 @@ def _dataset_from_backend_dataset(
     overwrite_encoded_chunks,
     **extra_tokens,
 ):
-    if not (isinstance(chunks, (int, dict)) or chunks is None):
-        if chunks != "auto":
-            raise ValueError(
-                "chunks must be an int, dict, 'auto', or None. "
-                "Instead found %s. " % chunks
-            )
+    if not isinstance(chunks, (int, dict)) and chunks not in {None, "auto"}:
+        raise ValueError(
+            f"chunks must be an int, dict, 'auto', or None. Instead found {chunks}."
+        )
 
     _protect_dataset_variables_inplace(backend_ds, cache)
     if chunks is None:
@@ -330,9 +328,8 @@ def _dataset_from_backend_dataset(
     ds.set_close(backend_ds._close)
 
     # Ensure source filename always stored in dataset object (GH issue #2550)
-    if "source" not in ds.encoding:
-        if isinstance(filename_or_obj, str):
-            ds.encoding["source"] = filename_or_obj
+    if "source" not in ds.encoding and isinstance(filename_or_obj, str):
+        ds.encoding["source"] = filename_or_obj
 
     return ds
 
@@ -448,7 +445,7 @@ def open_dataset(
           relevant when using dask or another form of parallelism. By default,
           appropriate locks are chosen to safely read and write files with the
           currently active dask scheduler. Supported by "netcdf4", "h5netcdf",
-          "pynio", "pseudonetcdf", "cfgrib".
+          "scipy", "pynio", "pseudonetcdf", "cfgrib".
 
         See engine open function for kwargs accepted by each specific engine.
 
@@ -514,7 +511,6 @@ def open_dataset(
         **decoders,
         **kwargs,
     )
-
     return ds
 
 
@@ -632,7 +628,7 @@ def open_dataarray(
           relevant when using dask or another form of parallelism. By default,
           appropriate locks are chosen to safely read and write files with the
           currently active dask scheduler. Supported by "netcdf4", "h5netcdf",
-          "pynio", "pseudonetcdf", "cfgrib".
+          "scipy", "pynio", "pseudonetcdf", "cfgrib".
 
         See engine open function for kwargs accepted by each specific engine.
 
@@ -738,7 +734,7 @@ def open_mfdataset(
         see the full documentation for more details [2]_.
     concat_dim : str, or list of str, DataArray, Index or None, optional
         Dimensions to concatenate files along.  You only need to provide this argument
-        if ``combine='by_coords'``, and if any of the dimensions along which you want to
+        if ``combine='nested'``, and if any of the dimensions along which you want to
         concatenate is not a dimension in the original datasets, e.g., if you want to
         stack a collection of 2D arrays along a third dimension. Set
         ``concat_dim=[..., None, ...]`` explicitly to disable concatenation along a
@@ -877,14 +873,28 @@ def open_mfdataset(
     if not paths:
         raise OSError("no files to open")
 
-    # If combine='by_coords' then this is unnecessary, but quick.
-    # If combine='nested' then this creates a flat list which is easier to
-    # iterate over, while saving the originally-supplied structure as "ids"
     if combine == "nested":
         if isinstance(concat_dim, (str, DataArray)) or concat_dim is None:
             concat_dim = [concat_dim]
-    combined_ids_paths = _infer_concat_order_from_positions(paths)
-    ids, paths = (list(combined_ids_paths.keys()), list(combined_ids_paths.values()))
+
+        # This creates a flat list which is easier to iterate over, whilst
+        # encoding the originally-supplied structure as "ids".
+        # The "ids" are not used at all if combine='by_coords`.
+        combined_ids_paths = _infer_concat_order_from_positions(paths)
+        ids, paths = (
+            list(combined_ids_paths.keys()),
+            list(combined_ids_paths.values()),
+        )
+
+    # TODO raise an error instead of a warning after v0.19
+    elif combine == "by_coords" and concat_dim is not None:
+        warnings.warn(
+            "When combine='by_coords', passing a value for `concat_dim` has no "
+            "effect. This combination will raise an error in future. To manually "
+            "combine along a specific dimension you should instead specify "
+            "combine='nested' along with a value for `concat_dim`.",
+            DeprecationWarning,
+        )
 
     open_kwargs = dict(engine=engine, chunks=chunks or {}, **kwargs)
 
@@ -1000,8 +1010,8 @@ def to_netcdf(
         elif engine != "scipy":
             raise ValueError(
                 "invalid engine for creating bytes with "
-                "to_netcdf: %r. Only the default engine "
-                "or engine='scipy' is supported" % engine
+                f"to_netcdf: {engine!r}. Only the default engine "
+                "or engine='scipy' is supported"
             )
         if not compute:
             raise NotImplementedError(
@@ -1022,7 +1032,7 @@ def to_netcdf(
     try:
         store_open = WRITEABLE_STORES[engine]
     except KeyError:
-        raise ValueError("unrecognized engine for to_netcdf: %r" % engine)
+        raise ValueError(f"unrecognized engine for to_netcdf: {engine!r}")
 
     if format is not None:
         format = format.upper()
@@ -1034,9 +1044,8 @@ def to_netcdf(
     autoclose = have_chunks and scheduler in ["distributed", "multiprocessing"]
     if autoclose and engine == "scipy":
         raise NotImplementedError(
-            "Writing netCDF files with the %s backend "
-            "is not currently supported with dask's %s "
-            "scheduler" % (engine, scheduler)
+            f"Writing netCDF files with the {engine} backend "
+            f"is not currently supported with dask's {scheduler} scheduler"
         )
 
     target = path_or_file if path_or_file is not None else BytesIO()
@@ -1046,7 +1055,7 @@ def to_netcdf(
             kwargs["invalid_netcdf"] = invalid_netcdf
         else:
             raise ValueError(
-                "unrecognized option 'invalid_netcdf' for engine %s" % engine
+                f"unrecognized option 'invalid_netcdf' for engine {engine}"
             )
     store = store_open(target, mode, format, group, **kwargs)
 
@@ -1188,7 +1197,7 @@ def save_mfdataset(
     Data variables:
         a        (time) float64 0.0 0.02128 0.04255 0.06383 ... 0.9574 0.9787 1.0
     >>> years, datasets = zip(*ds.groupby("time.year"))
-    >>> paths = ["%s.nc" % y for y in years]
+    >>> paths = [f"{y}.nc" for y in years]
     >>> xr.save_mfdataset(datasets, paths)
     """
     if mode == "w" and len(set(paths)) < len(paths):
@@ -1200,7 +1209,7 @@ def save_mfdataset(
         if not isinstance(obj, Dataset):
             raise TypeError(
                 "save_mfdataset only supports writing Dataset "
-                "objects, received type %s" % type(obj)
+                f"objects, received type {type(obj)}"
             )
 
     if groups is None:
@@ -1237,6 +1246,42 @@ def save_mfdataset(
         )
 
 
+def _validate_region(ds, region):
+    if not isinstance(region, dict):
+        raise TypeError(f"``region`` must be a dict, got {type(region)}")
+
+    for k, v in region.items():
+        if k not in ds.dims:
+            raise ValueError(
+                f"all keys in ``region`` are not in Dataset dimensions, got "
+                f"{list(region)} and {list(ds.dims)}"
+            )
+        if not isinstance(v, slice):
+            raise TypeError(
+                "all values in ``region`` must be slice objects, got "
+                f"region={region}"
+            )
+        if v.step not in {1, None}:
+            raise ValueError(
+                "step on all slices in ``region`` must be 1 or None, got "
+                f"region={region}"
+            )
+
+    non_matching_vars = [
+        k for k, v in ds.variables.items() if not set(region).intersection(v.dims)
+    ]
+    if non_matching_vars:
+        raise ValueError(
+            f"when setting `region` explicitly in to_zarr(), all "
+            f"variables in the dataset to write must have at least "
+            f"one dimension in common with the region's dimensions "
+            f"{list(region.keys())}, but that is not "
+            f"the case for some variables here. To drop these variables "
+            f"from this dataset before exporting to zarr, write: "
+            f".drop({non_matching_vars!r})"
+        )
+
+
 def _validate_datatypes_for_zarr_append(dataset):
     """DataArray.name and Dataset keys must be a string or None"""
 
@@ -1261,98 +1306,6 @@ def _validate_datatypes_for_zarr_append(dataset):
         check_dtype(k)
 
 
-def _validate_append_dim_and_encoding(
-    ds_to_append, store, append_dim, region, encoding, **open_kwargs
-):
-    try:
-        ds = backends.zarr.open_zarr(store, **open_kwargs)
-    except ValueError:  # store empty
-        return
-
-    if append_dim:
-        if append_dim not in ds.dims:
-            raise ValueError(
-                f"append_dim={append_dim!r} does not match any existing "
-                f"dataset dimensions {ds.dims}"
-            )
-        if region is not None and append_dim in region:
-            raise ValueError(
-                f"cannot list the same dimension in both ``append_dim`` and "
-                f"``region`` with to_zarr(), got {append_dim} in both"
-            )
-
-    if region is not None:
-        if not isinstance(region, dict):
-            raise TypeError(f"``region`` must be a dict, got {type(region)}")
-        for k, v in region.items():
-            if k not in ds_to_append.dims:
-                raise ValueError(
-                    f"all keys in ``region`` are not in Dataset dimensions, got "
-                    f"{list(region)} and {list(ds_to_append.dims)}"
-                )
-            if not isinstance(v, slice):
-                raise TypeError(
-                    "all values in ``region`` must be slice objects, got "
-                    f"region={region}"
-                )
-            if v.step not in {1, None}:
-                raise ValueError(
-                    "step on all slices in ``region`` must be 1 or None, got "
-                    f"region={region}"
-                )
-
-        non_matching_vars = [
-            k
-            for k, v in ds_to_append.variables.items()
-            if not set(region).intersection(v.dims)
-        ]
-        if non_matching_vars:
-            raise ValueError(
-                f"when setting `region` explicitly in to_zarr(), all "
-                f"variables in the dataset to write must have at least "
-                f"one dimension in common with the region's dimensions "
-                f"{list(region.keys())}, but that is not "
-                f"the case for some variables here. To drop these variables "
-                f"from this dataset before exporting to zarr, write: "
-                f".drop({non_matching_vars!r})"
-            )
-
-    for var_name, new_var in ds_to_append.variables.items():
-        if var_name in ds.variables:
-            existing_var = ds.variables[var_name]
-            if new_var.dims != existing_var.dims:
-                raise ValueError(
-                    f"variable {var_name!r} already exists with different "
-                    f"dimension names {existing_var.dims} != "
-                    f"{new_var.dims}, but changing variable "
-                    f"dimensions is not supported by to_zarr()."
-                )
-
-            existing_sizes = {}
-            for dim, size in existing_var.sizes.items():
-                if region is not None and dim in region:
-                    start, stop, stride = region[dim].indices(size)
-                    assert stride == 1  # region was already validated above
-                    size = stop - start
-                if dim != append_dim:
-                    existing_sizes[dim] = size
-
-            new_sizes = {
-                dim: size for dim, size in new_var.sizes.items() if dim != append_dim
-            }
-            if existing_sizes != new_sizes:
-                raise ValueError(
-                    f"variable {var_name!r} already exists with different "
-                    f"dimension sizes: {existing_sizes} != {new_sizes}. "
-                    f"to_zarr() only supports changing dimension sizes when "
-                    f"explicitly appending, but append_dim={append_dim!r}."
-                )
-            if var_name in encoding.keys():
-                raise ValueError(
-                    f"variable {var_name!r} already exists, but encoding was provided"
-                )
-
-
 def to_zarr(
     dataset: Dataset,
     store: Union[MutableMapping, str, Path] = None,
@@ -1362,9 +1315,10 @@ def to_zarr(
     group: str = None,
     encoding: Mapping = None,
     compute: bool = True,
-    consolidated: bool = False,
+    consolidated: Optional[bool] = None,
     append_dim: Hashable = None,
     region: Mapping[str, slice] = None,
+    safe_chunks: bool = True,
 ):
     """This function creates an appropriate datastore for writing a dataset to
     a zarr ztore
@@ -1380,57 +1334,81 @@ def to_zarr(
         encoding = {}
 
     if mode is None:
-        if append_dim is not None or region is not None:
+        if append_dim is not None:
             mode = "a"
+        elif region is not None:
+            mode = "r+"
         else:
             mode = "w-"
 
     if mode != "a" and append_dim is not None:
         raise ValueError("cannot set append_dim unless mode='a' or mode=None")
 
-    if mode != "a" and region is not None:
-        raise ValueError("cannot set region unless mode='a' or mode=None")
+    if mode not in ["a", "r+"] and region is not None:
+        raise ValueError("cannot set region unless mode='a', mode='r+' or mode=None")
 
-    if mode not in ["w", "w-", "a"]:
-        # TODO: figure out how to handle 'r+'
+    if mode not in ["w", "w-", "a", "r+"]:
         raise ValueError(
             "The only supported options for mode are 'w', "
-            f"'w-' and 'a', but mode={mode!r}"
-        )
-
-    if consolidated and region is not None:
-        raise ValueError(
-            "cannot use consolidated=True when the region argument is set. "
-            "Instead, set consolidated=True when writing to zarr with "
-            "compute=False before writing data."
+            f"'w-', 'a' and 'r+', but mode={mode!r}"
         )
 
     # validate Dataset keys, DataArray names, and attr keys/values
     _validate_dataset_names(dataset)
     _validate_attrs(dataset)
 
-    if mode == "a":
-        _validate_datatypes_for_zarr_append(dataset)
-        _validate_append_dim_and_encoding(
-            dataset,
-            store,
-            append_dim,
-            group=group,
-            consolidated=consolidated,
-            region=region,
-            encoding=encoding,
-        )
+    if region is not None:
+        _validate_region(dataset, region)
+        if append_dim is not None and append_dim in region:
+            raise ValueError(
+                f"cannot list the same dimension in both ``append_dim`` and "
+                f"``region`` with to_zarr(), got {append_dim} in both"
+            )
 
+    if mode == "r+":
+        already_consolidated = consolidated
+        consolidate_on_close = False
+    else:
+        already_consolidated = False
+        consolidate_on_close = consolidated or consolidated is None
     zstore = backends.ZarrStore.open_group(
         store=store,
         mode=mode,
         synchronizer=synchronizer,
         group=group,
-        consolidate_on_close=consolidated,
+        consolidated=already_consolidated,
+        consolidate_on_close=consolidate_on_close,
         chunk_store=chunk_store,
         append_dim=append_dim,
         write_region=region,
+        safe_chunks=safe_chunks,
+        stacklevel=4,  # for Dataset.to_zarr()
     )
+
+    if mode in ["a", "r+"]:
+        _validate_datatypes_for_zarr_append(dataset)
+        if append_dim is not None:
+            existing_dims = zstore.get_dimensions()
+            if append_dim not in existing_dims:
+                raise ValueError(
+                    f"append_dim={append_dim!r} does not match any existing "
+                    f"dataset dimensions {existing_dims}"
+                )
+        existing_var_names = set(zstore.zarr_group.array_keys())
+        for var_name in existing_var_names:
+            if var_name in encoding.keys():
+                raise ValueError(
+                    f"variable {var_name!r} already exists, but encoding was provided"
+                )
+        if mode == "r+":
+            new_names = [k for k in dataset.variables if k not in existing_var_names]
+            if new_names:
+                raise ValueError(
+                    f"dataset contains non-pre-existing variables {new_names}, "
+                    "which is not allowed in ``xarray.Dataset.to_zarr()`` with "
+                    "mode='r+'. To allow writing new variables, set mode='a'."
+                )
+
     writer = ArrayWriter()
     # TODO: figure out how to properly handle unlimited_dims
     dump_to_store(dataset, zstore, writer, encoding=encoding)
